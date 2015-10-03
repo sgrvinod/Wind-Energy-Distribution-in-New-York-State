@@ -1,0 +1,72 @@
+```{r, echo=FALSE}
+if(!require(plyr)) install.packages("plyr")
+library(plyr)
+if(!require(ggplot2)) install.packages("ggplot2")
+library(ggplot2)
+if(!require(lpSolveAPI)) install.packages("lpSolveAPI")
+library(lpSolveAPI)
+
+#So variables are: 66 turbine no. allocations and 8760 othergens
+#8760 energu balance constraints (sigma nti times gen per + othergenh >= demh - blh)
+#1 constraint for sigma nti=5000
+#bounds: nti are integers, 0<=nti<=ntimax, 0<=othergen<=othergentot/8760
+
+#minimise totdem - totbl -sigma nti * anngenper
+
+#Import number of turbines data
+nt<-read.csv("wind.sites.csv")
+genperturb<-read.csv("sites.wind.power.per.csv")
+dem<-read.csv("demand.csv")
+gen<-read.csv("gen.info.csv")
+
+blgenann=sum(gen[,2:4])*1000
+blgenh=blgenann/8760
+Ch=sum(gen[,5])+10050
+C=Ch*8760
+genperturb<-genperturb[-c(1)]
+
+deficit<-data.frame("Hour"=1:8760)
+for (i in 1:8760){
+  deficit$Deficit[i]=sum(dem[i,2:4])-blgenh
+}
+
+windsite<-data.frame("SiteNo"=1:66)
+windsite$ntimax=nt$n.t.max
+for (i in 1:66){
+  windsite$anngenper[i]=sum(genperturb[,i])
+}
+
+#Create LP model
+lpm<-make.lp(8761,8760+66)
+lp.control(lpm, sense="min")
+#Define objective function
+set.objfn(lpm, obj=c(rep(0,66),rep(1,8760)))
+
+#Define constraint co-efficients
+for (i in 1:66){
+  set.column(lpm, i, c(genperturb[,i],1))
+}
+for (i in 1:8760){
+  set.mat(lpm, i, i+66,1)
+}
+
+#Define constraint types
+set.constr.type(lpm, c(rep(">=", 8760),"="))
+
+#Define constraints' RHSs
+set.rhs(lpm,c(deficit$Deficit,3000))
+
+#Force type of variable for allocation of turbines
+set.type(lpm, 1:66, "integer")
+
+#Set upper and lower bounds for variables
+set.bounds(lpm, lower = rep(0,ncol(lpm)),upper = c(windsite$ntimax,rep(Ch,8760)))
+
+#Solve
+solve(lpm)
+
+#Save turbine allocations to "windsite" array
+windsite$allocated<-get.variables(lpm)[1:66]
+
+
+```

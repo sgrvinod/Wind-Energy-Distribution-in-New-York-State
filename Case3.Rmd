@@ -1,0 +1,107 @@
+```{r, echo=FALSE}
+if(!require(plyr)) install.packages("plyr")
+library(plyr)
+if(!require(ggplot2)) install.packages("ggplot2")
+library(ggplot2)
+if(!require(lpSolveAPI)) install.packages("lpSolveAPI")
+library(lpSolveAPI)
+
+#So variables are: 66 turbine no. allocations and 8760 othergens
+#8760 energu balance constraints (sigma nti times gen per + othergenh >= demh - blh)
+#1 constraint for sigma nti=5000
+#bounds: nti are integers, 0<=nti<=ntimax, 0<=othergen<=othergentot/8760
+
+#minimise totdem - totbl -sigma nti * anngenper
+
+#Import number of turbines data
+nt<-read.csv("wind.sites.csv")
+genperturb<-read.csv("sites.wind.power.per.csv")
+genperturb<-genperturb[-c(1)]
+dem<-read.csv("demand.csv")
+gen<-read.csv("gen.info.csv")
+imp<-read.csv("import.limits.csv")
+trans<-read.csv("trans.limits.csv")
+
+blgenh.west=sum(gen[1,2:4])*1000/8760
+blgenh.east=sum(gen[2,2:4])*1000/8760
+blgenh.ds=sum(gen[3,2:4])*1000/8760
+Ch.west<-gen[1,5]+sum(imp[1,2:5])
+Ch.east<-gen[2,5]+sum(imp[2,2:5])
+Ch.ds<-gen[3,5]+sum(imp[3,2:5])
+trans.w.e=trans[1,3]
+trans.e.d=trans[2,3]
+
+windsite=data.frame("SiteNo"=1:66)
+windsite$region=nt$region
+windsite$ntimax=nt$n.t.max
+for (i in 1:66){
+  windsite$anngenper[i]=sum(genperturb[,i])
+}
+n.west=sum(windsite$region=="west")
+n.east=sum(windsite$region=="east")
+n.ds=sum(windsite$region=="downstate")
+n.sites=n.west+n.east+n.ds
+
+deficit<-data.frame("Hour"=1:8760)
+for (i in 1:8760){
+  deficit$west[i]=dem[i,2]-blgenh.west
+  deficit$east[i]=dem[i,3]-blgenh.east
+  deficit$ds[i]=dem[i,4]-blgenh.ds
+}
+# deficit$west[deficit$west<0]=0
+# deficit$east[deficit$east<0]=0
+# deficit$ds[deficit$ds<0]=0
+
+#Create LP model
+lpm3<-make.lp(26281,43866)
+lp.control(lpm3, sense="min")
+
+#Define objective function
+set.objfn(lpm3, obj=c(rep(0,66),rep(1,8760*3),rep(0,8760*2)))
+
+#Define constraint co-efficients
+for (i in 1:n.west){
+  set.column(lpm3, i, c(genperturb[,i],rep(0,8760*2),1))
+}
+for (i in (n.west+1):(n.west+n.east)){
+  set.column(lpm3, i, c(rep(0,8760),genperturb[,i],rep(0,8760),1))
+}
+for (i in (n.west+n.east+1):n.sites){
+  set.column(lpm3, i, c(rep(0,8760*2),genperturb[,i],1))
+}
+
+for (i in 1:8760){
+  #Othergens for West for West Energy Balance
+  set.mat(lpm3, i, i+66,1)
+  #Othergens for East for East Energy Balance
+  set.mat(lpm3, 8760+i, i+8760+66, 1)
+  #Othergens for Downstate Energy Balance
+  set.mat(lpm3, (8760*2)+i, i+(8760*2)+66, 1)
+  
+  #Trans from West to East for West energy balance
+  set.mat(lpm3, i, i+(8760*3)+66, -1)
+  #Trans from West to East for East energy balance
+  set.mat(lpm3, 8760+i, i+(8760*3)+66, 1)
+  #Trans from East to Downstate for East energy balance
+  set.mat(lpm3, 8760+i, i+(8760*4)+66, -1)
+  #Trans from East to Downstate for Downstate energy balance
+  set.mat(lpm3, (8760*2)+i, i+(8760*4)+66, 1)  
+}
+
+#Define constraint types
+set.constr.type(lpm3, c(rep(">=", 8760*3),"="))
+
+#Define constraints' RHSs
+set.rhs(lpm3,c(deficit$west,deficit$east,deficit$ds,3000))
+
+#Force type of variable for allocation of turbines
+set.type(lpm3, 1:66, "integer")
+
+#Set upper and lower bounds for variables
+set.bounds(lpm3, lower = rep(0,ncol(lpm3)),upper = c(windsite$ntimax,rep(Ch.west,8760),rep(Ch.east,8760),rep(Ch.ds,8760),rep(trans.w.e,8760),rep(trans.e.d,8760)))
+
+solve(lpm3)
+
+
+
+```

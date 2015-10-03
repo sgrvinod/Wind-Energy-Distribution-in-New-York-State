@@ -1,0 +1,123 @@
+Testing for 15GW case - add constraints by column
+```{r, echo=FALSE}
+if(!require(plyr)) install.packages("plyr")
+library(plyr)
+if(!require(ggplot2)) install.packages("ggplot2")
+library(ggplot2)
+if(!require(lpSolveAPI)) install.packages("lpSolveAPI")
+library(lpSolveAPI)
+
+#Import all data required
+nt<-read.csv("wind.sites.csv")
+genperturb<-read.csv("sites.wind.power.per.csv")
+genperturb<-genperturb[-c(1)]
+dem<-read.csv("demand.csv")
+gen<-read.csv("gen.info.csv")
+imp<-read.csv("import.limits.csv")
+trans<-read.csv("trans.limits.csv")
+
+#Calculate hourly, annual baseload generation and demand
+blgenann=sum(gen[,2:4])*1000
+demann=sum(dem[,2:4])
+blgenh.west=sum(gen[1,2:4])*1000/8760
+blgenh.east=sum(gen[2,2:4])*1000/8760
+blgenh.ds=sum(gen[3,2:4])*1000/8760
+
+#Calculate limits for Other Generation and Transfers
+Ch.west<-gen[1,5]+sum(imp[1,2:5])
+Ch.east<-gen[2,5]+sum(imp[2,2:5])
+Ch.ds<-gen[3,5]+sum(imp[3,2:5])
+trans.w.e=trans[1,3]
+trans.e.d=trans[2,3]
+
+#Create data frame to hold maximum number of turbines
+windsite4=data.frame("SiteNo"=1:66)
+windsite4$region=nt$region
+windsite4$ntimax=nt$n.t.max
+
+#Find number of turbines in each region
+n.west=sum(windsite4$region=="west")
+n.east=sum(windsite4$region=="east")
+n.ds=sum(windsite4$region=="downstate")
+n.sites=n.west+n.east+n.ds
+
+#Calculate deficit for each hour
+deficit<-data.frame("Hour"=1:8760)
+for (i in 1:8760){
+  deficit$west[i]=dem[i,2]-blgenh.west
+  deficit$east[i]=dem[i,3]-blgenh.east
+  deficit$ds[i]=dem[i,4]-blgenh.ds
+}
+
+#Create LP model
+lpm4<-make.lp(43802,43868)
+lp.control(lpm4, sense="min")
+
+#Define objective function
+set.objfn(lpm4, obj=c(rep(0,66),rep(1,8760*3),rep(0,(8760*2)+2)))
+
+#Define constraint co-efficients for turbine allocations
+for (i in 1:n.west){
+  set.column(lpm4, i, c(genperturb[,i],rep(0,8760*4),1,0))
+}
+for (i in (n.west+1):(n.west+n.east)){
+  set.column(lpm4, i, c(rep(0,8760),genperturb[,i],rep(0,8760*3),1,0))
+}
+for (i in (n.west+n.east+1):n.sites){
+  set.column(lpm4, i, c(rep(0,8760*2),genperturb[,i],rep(0,8760*2),1,0))
+}
+
+#Set rest of constraint co-efficients
+for (i in 1:8760){
+  #Othergens for West for West Energy Balance
+  set.mat(lpm4, i, i+66,1)
+  #Othergens for East for East Energy Balance
+  set.mat(lpm4, 8760+i, i+8760+66, 1)
+  #Othergens for Downstate Energy Balance
+  set.mat(lpm4, (8760*2)+i, i+(8760*2)+66, 1)
+  #Trans from West to East for West energy balance
+  set.mat(lpm4, i, i+(8760*3)+66, -1)
+  #Trans from West to East for East energy balance
+  set.mat(lpm4, 8760+i, i+(8760*3)+66, 1)
+  #Trans from East to Downstate for East energy balance
+  set.mat(lpm4, 8760+i, i+(8760*4)+66, -1)
+  #Trans from East to Downstate for Downstate energy balance
+  set.mat(lpm4, (8760*2)+i, i+(8760*4)+66, 1)  
+  #Trans limits for West-East
+  set.mat(lpm4, (8760*3)+i, i+(8760*3)+66, 1)
+  set.mat(lpm4, (8760*3)+i, 43867,-400)
+  #Trans limits for East-Downstate
+  set.mat(lpm4, (8760*4)+i, i+(8760*4)+66, 1)
+  set.mat(lpm4, (8760*4)+i, 43868,-400)
+}
+
+#Set cost constraints
+#Using CF_Case3=0.2679
+for (i in 67:(66+(8760*3))){
+  set.mat(lpm4,43802,i,1)
+}
+anncostwindpermw=1500000*0.1
+anncostweperline=1000000*200*0.1
+anncostedsperline=1000000*150*0.1
+coeffwe=8760*0.2679*anncostweperline/anncostwindpermw
+coeffeds=8760*0.2679*anncostedsperline/anncostwindpermw
+set.mat(lpm4,43802,43867,coeffwe)
+set.mat(lpm4,43802,43868,coeffeds)
+
+#Define constraint types
+set.constr.type(lpm4, c(rep(">=", 8760*3),rep("<=",8760*2),"=","<="))
+
+#Define constraints' RHSs
+set.rhs(lpm4,c(deficit$west,deficit$east,deficit$ds,rep(trans.w.e,8760),rep(trans.e.d,8760),5000, (demann-blgenann-(0.2679*8760*15000))))
+
+#Force type of variable for allocation of turbines
+set.type(lpm4, 1:66, "integer")
+set.type(lpm4,c(ncol(lpm4)-1,ncol(lpm4)),type="integer")
+
+#Set upper and lower bounds for variables
+set.bounds(lpm4, lower = rep(0,ncol(lpm4)),upper = c(windsite4$ntimax,rep(Ch.west,8760),rep(Ch.east,8760),rep(Ch.ds,8760),rep(Inf,8760),rep(Inf,8760),Inf,Inf))
+
+#Solve
+solve(lpm4)
+
+```
